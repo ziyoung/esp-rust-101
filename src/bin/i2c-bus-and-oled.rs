@@ -1,11 +1,18 @@
-use embedded_graphics::Drawable;
+use embedded_graphics::{
+    image::{Image, ImageRaw},
+    pixelcolor::BinaryColor,
+    prelude::{Point, Primitive, Size},
+    primitives::{PrimitiveStyleBuilder, Rectangle},
+    text::{Baseline, Text},
+    Drawable,
+};
+use embedded_hal_bus::{i2c, util::AtomicCell};
 use esp_idf_svc::hal::{
     delay::FreeRtos,
     i2c::{I2cConfig, I2cDriver},
     prelude::Peripherals,
     units::KiloHertz,
 };
-use shared_bus::BusManagerSimple;
 use ssd1306::mode::DisplayConfig;
 
 fn main() -> anyhow::Result<()> {
@@ -18,11 +25,12 @@ fn main() -> anyhow::Result<()> {
     let config = I2cConfig::new().baudrate(KiloHertz::from(1).into());
     // 方式 1
     let i2c_driver = I2cDriver::new(peripherals.i2c0, sda, scl, &config)?;
+
+    let i2c_cell = AtomicCell::new(i2c_driver);
     // 方式 2
     // let i2c_driver = I2cDriver::new(peripherals.i2c0, peripherals.pins.gpio10, peripherals.pins.gpio8, &config)?;
-    let bus = BusManagerSimple::new(i2c_driver);
-    let mut sht = shtcx::shtc3(bus.acquire_i2c());
-    let interface = ssd1306::I2CDisplayInterface::new(bus.acquire_i2c());
+    let mut sht = shtcx::shtc3(i2c::AtomicDevice::new(&i2c_cell));
+    let interface = ssd1306::I2CDisplayInterface::new(i2c::AtomicDevice::new(&i2c_cell));
     let mut display = ssd1306::Ssd1306::new(
         interface,
         ssd1306::size::DisplaySize128x64,
@@ -33,33 +41,44 @@ fn main() -> anyhow::Result<()> {
     loop {
         sht.start_measurement(shtcx::PowerMode::NormalMode).unwrap();
         FreeRtos::delay_ms(100);
+
         let measurement = sht.get_measurement_result().unwrap();
-        let text_style = embedded_graphics::mono_font::MonoTextStyleBuilder::new()
-            .font(&embedded_graphics::mono_font::ascii::FONT_6X10)
-            .text_color(embedded_graphics::pixelcolor::BinaryColor::On)
-            .build();
-
+        let text_style = u8g2_fonts::U8g2TextStyle::new(
+            u8g2_fonts::fonts::u8g2_font_unifont_t_gb2312, // 选用这个，否则某些汉字无法显示
+            BinaryColor::On,                               // Off 时为黑色，无法显示
+        );
         let temperature = measurement.temperature.as_degrees_celsius();
-        let humidity = measurement.humidity.as_percent();
-        let temperature_str = format!("Temperature: {:.2} °C", temperature);
-        let humidity_str = format!("Humidity: {:.2} %", humidity);
-        embedded_graphics::text::Text::with_baseline(
+        let temperature_str = format!("温度: {:.2} °C", temperature);
+        Text::with_baseline(
             &temperature_str,
-            embedded_graphics::prelude::Point::zero(),
-            text_style,
-            embedded_graphics::text::Baseline::Top,
+            Point::new(0, 4),
+            text_style.clone(),
+            Baseline::Top,
         )
         .draw(&mut display)
         .unwrap();
 
-        embedded_graphics::text::Text::with_baseline(
-            &humidity_str,
-            embedded_graphics::prelude::Point::new(0, 16),
-            text_style,
-            embedded_graphics::text::Baseline::Top,
-        )
-        .draw(&mut display)
-        .unwrap();
+        let humidity = measurement.humidity.as_percent();
+        let humidity_str = format!("湿度: {:.2} %", humidity);
+        Text::with_baseline(&humidity_str, Point::new(0, 23), text_style, Baseline::Top)
+            .draw(&mut display)
+            .unwrap();
+
+        let ohm = &[0b00111000, 0b01000100, 0b01000100, 0b00101000, 0b11101110];
+        // width 不一定是 8 的倍数，如果不是 8 的倍数时，相应位置的 u8 后几位就为 0
+        let raw_image = ImageRaw::<BinaryColor>::new(ohm, 8);
+        let image = Image::new(&raw_image, Point::new(0, 36));
+        image.draw(&mut display).unwrap();
+
+        Rectangle::new(Point::new(0, 42), Size::new(127, 22))
+            .into_styled(
+                PrimitiveStyleBuilder::new()
+                    .stroke_width(1)
+                    .stroke_color(BinaryColor::On)
+                    .build(),
+            )
+            .draw(&mut display)
+            .unwrap();
 
         display.flush().unwrap();
         std::thread::sleep(std::time::Duration::from_millis(1000));
